@@ -27,6 +27,9 @@ dependencies:
   
   # AI/LLM
   google_generative_ai: ^0.4.6
+
+  # Environment Variables
+  flutter_dotenv: ^6.0.0
   
   
 dev_dependencies:
@@ -37,3 +40,5 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - .env

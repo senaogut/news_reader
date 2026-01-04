@@ -44,6 +44,7 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 /docs
+.env
 
 # Example folders
 # /html-examples/

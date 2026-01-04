@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:developer' as developer;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 import '../models/news_article.dart';
 import '../models/news_category.dart';
@@ -45,25 +46,24 @@ class ArticleSummary {
   final String detailedSummary;
   final NewsCategory category;
 
-  const ArticleSummary({
-    required this.briefSummary,
-    required this.detailedSummary,
-    this.category = NewsCategory.other,
-  });
+  const ArticleSummary({required this.briefSummary, required this.detailedSummary, this.category = NewsCategory.other});
 }
 
 /// Gemini-based implementation with concurrent processing
 class GeminiLlmRepository implements LlmRepository {
-  static const String _apiKey = 'AIzaSyBBlmqh5mWgaXgne_9XLesVssg2OslvKGY';
-
   late final GenerativeModel _model;
   final PromptService _promptService;
 
   GeminiLlmRepository({PromptService? promptService}) : _promptService = promptService ?? PromptService() {
+    final apiKey = dotenv.env['GEMINI_API_KEY'];
+    if (apiKey == null || apiKey.isEmpty) {
+      throw Exception('GEMINI_API_KEY not found in .env file');
+    }
+
     // Gemini 2.5 Flash - With billing enabled, concurrent processing is fine
     _model = GenerativeModel(
       model: 'gemini-2.5-flash',
-      apiKey: _apiKey,
+      apiKey: apiKey,
       generationConfig: GenerationConfig(temperature: 0.3, maxOutputTokens: 4096, topP: 0.95),
     );
   }
@@ -144,17 +144,17 @@ class GeminiLlmRepository implements LlmRepository {
 
       // Parse JSON response - clean control characters first
       final jsonResponse = _extractAndCleanJson(responseText);
-      
+
       Map<String, dynamic> data;
       try {
         data = json.decode(jsonResponse) as Map<String, dynamic>;
       } catch (parseError) {
         developer.log('❌ JSON Parse Error. Full response:\n$responseText', error: parseError);
         developer.log('❌ Extracted JSON that failed:\n$jsonResponse', error: parseError);
-        
+
         // Try to salvage partial response if possible
         data = _tryRecoverPartialJson(jsonResponse);
-        
+
         // If recovery failed, use fallback
         if (data.isEmpty) {
           developer.log('❌ Partial recovery also failed, using fallback');
@@ -166,7 +166,7 @@ class GeminiLlmRepository implements LlmRepository {
 
       // Build article summaries map with safe null handling
       final articleSummaries = <String, ArticleSummary>{};
-      
+
       // Parse category from response (shared for all articles in cluster)
       final categoryStr = data['category'] as String?;
       final category = NewsCategory.fromString(categoryStr);
@@ -178,14 +178,14 @@ class GeminiLlmRepository implements LlmRepository {
           for (final articleData in articlesData) {
             final dataMap = articleData as Map<String, dynamic>;
             final sourceId = dataMap['sourceId'] as String?;
-            
+
             if (sourceId != null) {
               // Find matching article in cluster by sourceId
               final matchingArticle = cluster.articles.firstWhere(
                 (a) => a.sourceId.toLowerCase() == sourceId.toLowerCase(),
                 orElse: () => cluster.articles.first,
               );
-              
+
               articleSummaries[matchingArticle.sourceId] = ArticleSummary(
                 briefSummary: dataMap['briefSummary'] as String? ?? 'AI özeti kullanılamıyor',
                 detailedSummary: dataMap['detailedSummary'] as String? ?? 'AI özeti kullanılamıyor',
@@ -194,7 +194,7 @@ class GeminiLlmRepository implements LlmRepository {
             }
           }
         }
-        
+
         // Fill in any missing articles with fallback
         for (final article in cluster.articles) {
           if (!articleSummaries.containsKey(article.sourceId)) {
@@ -237,7 +237,7 @@ class GeminiLlmRepository implements LlmRepository {
   /// Creates a fallback result when AI processing fails completely
   ClusterSummaryResult _createFallbackResult(ArticleCluster cluster) {
     final articleSummaries = <String, ArticleSummary>{};
-    
+
     for (final article in cluster.articles) {
       articleSummaries[article.sourceId] = const ArticleSummary(
         briefSummary: 'AI özeti oluşturulamadı',
@@ -245,7 +245,7 @@ class GeminiLlmRepository implements LlmRepository {
         category: NewsCategory.other,
       );
     }
-    
+
     return ClusterSummaryResult(
       cluster: cluster,
       articleSummaries: articleSummaries,
@@ -268,7 +268,7 @@ class GeminiLlmRepository implements LlmRepository {
   /// Extracts JSON from response text and cleans control characters
   String _extractAndCleanJson(String text) {
     String jsonText = text.trim();
-    
+
     // Step 1: Remove markdown code blocks if present (```json ... ``` or ``` ... ```)
     // Try multiple patterns to catch variations
     final patterns = [
@@ -276,7 +276,7 @@ class GeminiLlmRepository implements LlmRepository {
       RegExp(r'```\s*([\s\S]*?)\s*```', multiLine: true),
       RegExp(r'`\s*([\s\S]*?)\s*`', multiLine: true),
     ];
-    
+
     for (final pattern in patterns) {
       final match = pattern.firstMatch(jsonText);
       if (match != null) {
@@ -284,7 +284,7 @@ class GeminiLlmRepository implements LlmRepository {
         break;
       }
     }
-    
+
     // Step 2: If still no valid JSON, try to extract JSON object
     if (!jsonText.startsWith('{')) {
       final jsonStart = jsonText.indexOf('{');
@@ -299,7 +299,7 @@ class GeminiLlmRepository implements LlmRepository {
     // This is the KEY fix - Gemini returns literal newlines in strings which breaks JSON
     // Step 3: Fix unescaped quotes and control characters inside JSON strings
     jsonText = _fixUnescapedQuotes(jsonText);
-    
+
     // Step 4: Final cleanup - remove any leading/trailing whitespace
     jsonText = jsonText.trim();
 
@@ -312,31 +312,32 @@ class GeminiLlmRepository implements LlmRepository {
   String _fixUnescapedQuotes(String json) {
     final buffer = StringBuffer();
     int i = 0;
-    
+
     while (i < json.length) {
       final char = json[i];
-      
+
       // Look for start of a JSON string value (after : or in array)
       if (char == '"') {
         // Check if this is a key or value start
         // Find what comes before this quote (skip whitespace)
         int prevNonSpace = i - 1;
-        while (prevNonSpace >= 0 && (json[prevNonSpace] == ' ' || json[prevNonSpace] == '\n' || json[prevNonSpace] == '\t')) {
+        while (prevNonSpace >= 0 &&
+            (json[prevNonSpace] == ' ' || json[prevNonSpace] == '\n' || json[prevNonSpace] == '\t')) {
           prevNonSpace--;
         }
-        
+
         final prevChar = prevNonSpace >= 0 ? json[prevNonSpace] : '';
         final isValueStart = prevChar == ':' || prevChar == ',' || prevChar == '[';
-        
+
         if (isValueStart) {
           // This is the start of a string VALUE - need to find the real end
           buffer.write(char); // Write opening quote
           i++;
-          
+
           // Find the end of this string value
           final valueEnd = _findStringValueEnd(json, i);
           final stringContent = json.substring(i, valueEnd);
-          
+
           // Escape any unescaped quotes and control chars in the content
           buffer.write(_escapeStringContent(stringContent));
           buffer.write('"'); // Write closing quote
@@ -344,48 +345,48 @@ class GeminiLlmRepository implements LlmRepository {
           continue;
         }
       }
-      
+
       buffer.write(char);
       i++;
     }
-    
+
     return buffer.toString();
   }
-  
+
   /// Find the end of a JSON string value by looking for structural characters
   /// Returns the index of the closing quote
   int _findStringValueEnd(String json, int start) {
     int i = start;
     bool escaped = false;
-    
+
     while (i < json.length) {
       final char = json[i];
-      
+
       if (escaped) {
         escaped = false;
         i++;
         continue;
       }
-      
+
       if (char == '\\') {
         escaped = true;
         i++;
         continue;
       }
-      
+
       if (char == '"') {
         // Check what comes after this quote (skip whitespace)
         int nextNonSpace = i + 1;
-        while (nextNonSpace < json.length && 
-               (json[nextNonSpace] == ' ' || json[nextNonSpace] == '\n' || json[nextNonSpace] == '\t')) {
+        while (nextNonSpace < json.length &&
+            (json[nextNonSpace] == ' ' || json[nextNonSpace] == '\n' || json[nextNonSpace] == '\t')) {
           nextNonSpace++;
         }
-        
+
         if (nextNonSpace >= json.length) {
           // End of JSON - this is the closing quote
           return i;
         }
-        
+
         final nextChar = json[nextNonSpace];
         // If followed by JSON structural character, this is the real end
         if (nextChar == ',' || nextChar == '}' || nextChar == ']' || nextChar == ':') {
@@ -393,34 +394,34 @@ class GeminiLlmRepository implements LlmRepository {
         }
         // Otherwise it's an embedded quote - continue searching
       }
-      
+
       i++;
     }
-    
+
     // Fallback: return end of string
     return json.length;
   }
-  
+
   /// Escape content inside a JSON string value
   String _escapeStringContent(String content) {
     final buffer = StringBuffer();
     bool escaped = false;
-    
+
     for (int i = 0; i < content.length; i++) {
       final char = content[i];
-      
+
       if (escaped) {
         buffer.write(char);
         escaped = false;
         continue;
       }
-      
+
       if (char == '\\') {
         escaped = true;
         buffer.write(char);
         continue;
       }
-      
+
       switch (char) {
         case '"':
           buffer.write('\\"'); // Escape the quote
@@ -449,7 +450,7 @@ class GeminiLlmRepository implements LlmRepository {
           buffer.write(char);
       }
     }
-    
+
     return buffer.toString();
   }
 
@@ -471,28 +472,22 @@ class GeminiLlmRepository implements LlmRepository {
 
   /// Recovers data from truncated single article JSON
   Map<String, dynamic> _recoverSingleArticleJson(String brokenJson) {
-    final briefMatch = RegExp(
-      r'"briefSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)',
-      multiLine: true,
-    ).firstMatch(brokenJson);
-    
+    final briefMatch = RegExp(r'"briefSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)', multiLine: true).firstMatch(brokenJson);
+
     if (briefMatch == null) return {};
-    
+
     final briefSummary = briefMatch.group(1)?.trim() ?? 'Özet kısmen oluşturuldu.';
-    
+
     final detailedMatch = RegExp(
       r'"detailedSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)',
       multiLine: true,
     ).firstMatch(brokenJson);
-    
+
     final detailedSummary = detailedMatch?.group(1)?.trim() ?? briefSummary;
-    
+
     // Try to extract category
-    final categoryMatch = RegExp(
-      r'"category"\s*:\s*"([^"]*)"',
-      multiLine: true,
-    ).firstMatch(brokenJson);
-    
+    final categoryMatch = RegExp(r'"category"\s*:\s*"([^"]*)"', multiLine: true).firstMatch(brokenJson);
+
     return {
       'briefSummary': _unescapeRecoveredText(briefSummary),
       'detailedSummary': _unescapeRecoveredText(detailedSummary),
@@ -503,46 +498,34 @@ class GeminiLlmRepository implements LlmRepository {
   /// Recovers data from truncated multi-source articles array JSON
   Map<String, dynamic> _recoverMultiSourceJson(String brokenJson) {
     final articles = <Map<String, dynamic>>[];
-    
+
     // Try to extract category first (it's before articles array in our prompt)
-    final categoryMatch = RegExp(
-      r'"category"\s*:\s*"([^"]*)"',
-      multiLine: true,
-    ).firstMatch(brokenJson);
-    
+    final categoryMatch = RegExp(r'"category"\s*:\s*"([^"]*)"', multiLine: true).firstMatch(brokenJson);
+
     // Find all article objects using sourceId as anchor
-    final sourceIdPattern = RegExp(
-      r'"sourceId"\s*:\s*"([^"]+)"',
-      multiLine: true,
-    );
-    
+    final sourceIdPattern = RegExp(r'"sourceId"\s*:\s*"([^"]+)"', multiLine: true);
+
     final matches = sourceIdPattern.allMatches(brokenJson).toList();
-    
+
     for (int i = 0; i < matches.length; i++) {
       final sourceId = matches[i].group(1) ?? '';
       if (sourceId.isEmpty) continue;
-      
+
       // Extract the section for this article (from this sourceId to the next one or end)
       final startPos = matches[i].start;
       final endPos = (i + 1 < matches.length) ? matches[i + 1].start : brokenJson.length;
       final articleSection = brokenJson.substring(startPos, endPos);
-      
+
       // Extract briefSummary and detailedSummary from this section
-      final briefMatch = RegExp(
-        r'"briefSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)',
-      ).firstMatch(articleSection);
-      
-      final detailedMatch = RegExp(
-        r'"detailedSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)',
-      ).firstMatch(articleSection);
-      
+      final briefMatch = RegExp(r'"briefSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)').firstMatch(articleSection);
+
+      final detailedMatch = RegExp(r'"detailedSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)').firstMatch(articleSection);
+
       // Only add if we have at least briefSummary
       if (briefMatch != null) {
         final brief = _unescapeRecoveredText(briefMatch.group(1)?.trim() ?? '');
-        final detailed = detailedMatch != null 
-            ? _unescapeRecoveredText(detailedMatch.group(1)?.trim() ?? '')
-            : brief;
-        
+        final detailed = detailedMatch != null ? _unescapeRecoveredText(detailedMatch.group(1)?.trim() ?? '') : brief;
+
         articles.add({
           'sourceId': sourceId,
           'briefSummary': brief.isNotEmpty ? brief : 'Özet kısmen oluşturuldu.',
@@ -550,46 +533,36 @@ class GeminiLlmRepository implements LlmRepository {
         });
       }
     }
-    
+
     if (articles.isEmpty) return {};
-    
+
     // Try to extract groupSummary
-    final groupMatch = RegExp(
-      r'"groupSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)',
-      multiLine: true,
-    ).firstMatch(brokenJson);
-    
-    final result = <String, dynamic>{
-      'articles': articles,
-      'category': categoryMatch?.group(1)?.trim(),
-    };
-    
+    final groupMatch = RegExp(r'"groupSummary"\s*:\s*"([^"]*(?:\\.[^"]*)*)', multiLine: true).firstMatch(brokenJson);
+
+    final result = <String, dynamic>{'articles': articles, 'category': categoryMatch?.group(1)?.trim()};
+
     if (groupMatch != null) {
       result['groupSummary'] = _unescapeRecoveredText(groupMatch.group(1)?.trim() ?? '');
     } else {
       // Generate a fallback group summary from the first article's brief summary
-      result['groupSummary'] = articles.isNotEmpty 
+      result['groupSummary'] = articles.isNotEmpty
           ? articles.first['briefSummary'] as String
           : 'Grup özeti kısmen oluşturuldu.';
     }
-    
+
     developer.log('⚠️ Recovered ${articles.length} articles from truncated JSON');
     return result;
   }
-  
+
   /// Unescape recovered text and clean up truncation artifacts
   String _unescapeRecoveredText(String text) {
-    var result = text
-        .replaceAll(r'\n', '\n')
-        .replaceAll(r'\t', '\t')
-        .replaceAll(r'\"', '"')
-        .replaceAll(r'\\', '\\');
-    
+    var result = text.replaceAll(r'\n', '\n').replaceAll(r'\t', '\t').replaceAll(r'\"', '"').replaceAll(r'\\', '\\');
+
     // Remove trailing backslash (truncation artifact)
     while (result.endsWith('\\') || result.endsWith(' \\')) {
       result = result.substring(0, result.length - 1).trimRight();
     }
-    
+
     // Remove incomplete words at the end (if ends with space + partial word)
     if (result.isNotEmpty && !result.endsWith('.') && !result.endsWith('!') && !result.endsWith('?')) {
       // Find last complete sentence
@@ -597,13 +570,13 @@ class GeminiLlmRepository implements LlmRepository {
       final lastExclaim = result.lastIndexOf('!');
       final lastQuestion = result.lastIndexOf('?');
       final lastSentenceEnd = [lastPeriod, lastExclaim, lastQuestion].reduce((a, b) => a > b ? a : b);
-      
+
       if (lastSentenceEnd > result.length ~/ 2) {
         // Only truncate if we keep at least half the content
         result = result.substring(0, lastSentenceEnd + 1);
       }
     }
-    
+
     return result.trim();
   }
 }
